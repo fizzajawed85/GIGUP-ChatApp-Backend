@@ -16,7 +16,7 @@ const authMiddleware = async (req, res, next) => {
     if (!user) {
       return res.status(401).json({ message: "User not found" });
     }
-     console.log("LOGGED IN USER EMAIL:", user.email);
+    console.log("LOGGED IN USER EMAIL:", user.email);
 
     req.user = user; // full user object for controller
     next();
@@ -25,4 +25,4 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-module.exports = authMiddleware;
+module.exports = { protect: authMiddleware };

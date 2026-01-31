@@ -5,15 +5,17 @@ const User = require("../models/User");
 //  Add / Create Chat by Email (Human ↔ Human)
 exports.createChatByEmail = async (req, res, next) => {
   try {
-    const { email } = req.body;
+    const { email, nickname } = req.body; // 'email' can be email or username
     const loggedInUserId = req.user._id;
 
     if (!email) {
-      return res.status(400).json({ message: "Email is required" });
+      return res.status(400).json({ message: "Email or Username is required" });
     }
 
-    // find user by email
-    const userToChat = await User.findOne({ email });
+    // find user by email or username
+    const userToChat = await User.findOne({
+      $or: [{ email: email }, { username: email }],
+    });
 
     if (!userToChat) {
       return res.status(404).json({ message: "User not found" });
@@ -27,14 +29,27 @@ exports.createChatByEmail = async (req, res, next) => {
     let chat = await Chat.findOne({
       chatType: "user",
       participants: { $all: [loggedInUserId, userToChat._id] },
-    })
-      .populate("participants", "-password")
-      .populate({
-        path: "latestMessage",
-        populate: { path: "sender", select: "username email" },
-      });
+    });
 
     if (chat) {
+      // If nickname provided, update it
+      if (nickname) {
+        const nickIndex = chat.nicknames.findIndex(n => n.user.toString() === loggedInUserId.toString());
+        if (nickIndex !== -1) {
+          chat.nicknames[nickIndex].name = nickname;
+        } else {
+          chat.nicknames.push({ user: loggedInUserId, name: nickname });
+        }
+        await chat.save();
+      }
+
+      chat = await Chat.findById(chat._id)
+        .populate("participants", "-password")
+        .populate({
+          path: "latestMessage",
+          populate: { path: "sender", select: "username email" },
+        });
+
       return res.status(200).json(chat);
     }
 
@@ -42,6 +57,7 @@ exports.createChatByEmail = async (req, res, next) => {
     chat = await Chat.create({
       participants: [loggedInUserId, userToChat._id],
       chatType: "user",
+      nicknames: nickname ? [{ user: loggedInUserId, name: nickname }] : [],
     });
 
     chat = await Chat.findById(chat._id)

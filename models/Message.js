@@ -16,13 +16,34 @@ const messageSchema = new mongoose.Schema(
 
     text: {
       type: String,
-      required: true,
+      required: false, // Text is optional if sending a file
+    },
+    fileUrl: {
+      type: String, // Path to stored file
+      default: "",
+    },
+    fileType: {
+      type: String, // 'image', 'video', 'document', etc.
+      default: "",
     },
 
     // true when message is from AI
     aiResponse: {
       type: Boolean,
       default: false,
+    },
+    isEdited: {
+      type: Boolean,
+      default: false,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+    status: {
+      type: String,
+      enum: ["sent", "delivered", "seen"],
+      default: "sent",
     },
 
     // NEW: message cleared by specific users
