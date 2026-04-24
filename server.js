@@ -23,6 +23,9 @@ const path = require('path'); // Ensure path is required if not already
 
 // Routes
 console.log("Registering routes...");
+app.get("/", (req, res) => {
+  res.send("Backend Running");
+});
 app.get("/api/ping", (req, res) => res.json({ message: "pong" }));
 app.use("/api/ai", require("./routes/ai.routes"));
 console.log("AI routes registered.");
