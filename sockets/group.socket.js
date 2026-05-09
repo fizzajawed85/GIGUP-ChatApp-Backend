@@ -46,11 +46,16 @@ const initGroupSocket = (io) => {
                 group.latestMessage = newMessage._id;
 
                 // Increment unread count for all members except sender
+                const senderIdStr = senderId.toString().toLowerCase();
                 group.unreadCounts.forEach(uc => {
-                    if (uc.user.toString() !== senderId) {
+                    if (uc.user.toString().toLowerCase() !== senderIdStr) {
                         uc.count += 1;
+                    } else {
+                        uc.count = 0; // Ensure sender count is always 0
                     }
                 });
+
+                group.markModified('unreadCounts');
 
                 await group.save();
 
@@ -63,8 +68,15 @@ const initGroupSocket = (io) => {
                     groupName: group.name
                 };
 
-                // Emit to all members in the group room
+                // 1. Emit to the group room for active chat window updates
                 io.to(`group_${groupId}`).emit("groupMessage", msgData);
+
+                // 2. Emit to individual rooms for background notifications/sidebar updates
+                if (group.members) {
+                    group.members.forEach(memberId => {
+                        io.to(memberId.toString()).emit("groupMessage", msgData);
+                    });
+                }
             } catch (error) {
                 console.error("Error sending group message:", error);
                 socket.emit("error", { message: "Failed to send message" });
@@ -90,12 +102,14 @@ const initGroupSocket = (io) => {
 
                     // Reset unread count for this user
                     const group = await Group.findById(groupId);
-                    if (group) {
+                    if (group && group.unreadCounts) {
+                        const userIdStr = userId.toString().toLowerCase();
                         const userCount = group.unreadCounts.find(
-                            uc => uc.user.toString() === userId
+                            uc => uc.user.toString().toLowerCase() === userIdStr
                         );
                         if (userCount) {
                             userCount.count = 0;
+                            group.markModified('unreadCounts');
                             await group.save();
                         }
                     }

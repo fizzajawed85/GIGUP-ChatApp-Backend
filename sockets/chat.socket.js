@@ -1,88 +1,91 @@
+const mongoose = require("mongoose");
 const Message = require("../models/Message");
 const Chat = require("../models/Chat");
 const User = require("../models/User");
 const Notification = require("../models/Notification");
 
-// userId -> socket.id map (simplified for demo, usually store multiple sockets per user if needed)
-let onlineUsers = new Set();
-
 module.exports = (io) => {
   io.on("connection", (socket) => {
-    console.log("New client connected: " + socket.id);
+    const currentUserId = socket.userId;
+    if (!currentUserId) return;
 
-    socket.on("addUser", async (userId) => {
-      if (!userId) return;
-      socket.join(userId);
-      onlineUsers.add(userId);
+    User.findByIdAndUpdate(currentUserId, { isOnline: true }).catch(() => {});
+    io.emit("statusChange", { userId: currentUserId, isOnline: true });
 
-      try {
-        await User.findByIdAndUpdate(userId, { isOnline: true });
-        // Notify all users about status change
-        io.emit("statusChange", { userId, isOnline: true });
-      } catch (err) {
-        console.error("Error updating user status:", err);
-      }
+    socket.on("addUser", async () => {
+      socket.join(currentUserId);
     });
 
-    socket.on("joinChat", async (chatId) => {
-      socket.join(chatId);
+    socket.on("joinChat", (chatId) => {
+      if (chatId) socket.join(chatId);
     });
 
     socket.on("sendMessage", async (data) => {
       try {
-        const { chatId, senderId, text } = data;
+        const { chatId, text } = data || {};
+        if (!chatId) return;
+
         const chatBeforeUpdate = await Chat.findById(chatId);
-        if (!chatBeforeUpdate || !chatBeforeUpdate.participants.some(p => p.toString() === senderId))
+        if (
+          !chatBeforeUpdate ||
+          !chatBeforeUpdate.participants.some(
+            (p) => p.toString().toLowerCase() === currentUserId
+          )
+        ) {
           return;
+        }
 
         const message = await Message.create({
           chat: chatId,
-          sender: senderId,
-          text,
+          sender: currentUserId,
+          text: text || "",
           aiResponse: false,
         });
 
-        // Initialize unreadCounts if missing
         if (!chatBeforeUpdate.unreadCounts) chatBeforeUpdate.unreadCounts = [];
 
-        chatBeforeUpdate.participants.forEach(pId => {
-          const pIdStr = pId._id ? pId._id.toString() : pId.toString(); // Handle populated vs unpopulated
-          if (!chatBeforeUpdate.unreadCounts.some(uc => uc.user.toString() === pIdStr)) {
+        chatBeforeUpdate.participants.forEach((pId) => {
+          const pIdStr = (pId._id || pId).toString().toLowerCase();
+          if (!chatBeforeUpdate.unreadCounts.some((uc) => uc.user.toString().toLowerCase() === pIdStr)) {
             chatBeforeUpdate.unreadCounts.push({ user: pIdStr, count: 0 });
           }
         });
 
-        // Increment for others
-        chatBeforeUpdate.unreadCounts.forEach(uc => {
-          if (uc.user.toString() !== senderId.toString()) {
+        chatBeforeUpdate.unreadCounts.forEach((uc) => {
+          if (uc.user.toString().toLowerCase() === currentUserId) {
+            uc.count = 0;
+          } else {
             uc.count += 1;
           }
         });
 
         chatBeforeUpdate.latestMessage = message._id;
         chatBeforeUpdate.archivedBy = [];
+        chatBeforeUpdate.markModified("unreadCounts");
         await chatBeforeUpdate.save();
 
-        // Create notification for recipients
         try {
-          const sender = await User.findById(senderId);
-          const recipients = chatBeforeUpdate.participants.filter(p => p.toString() !== senderId.toString());
+          const sender = await User.findById(currentUserId);
+          const recipients = chatBeforeUpdate.participants.filter(
+            (p) => p.toString().toLowerCase() !== currentUserId
+          );
 
           for (const recipientId of recipients) {
             await Notification.create({
               recipient: recipientId,
-              sender: senderId,
-              type: 'message',
-              title: `New Message from ${sender?.username || 'User'}`,
-              content: text || 'Sent an attachment',
-              data: { chatId, messageId: message._id }
+              sender: currentUserId,
+              type: "message",
+              title: `New Message from ${sender?.username || "User"}`,
+              content: text || "Sent an attachment",
+              data: { chatId, messageId: message._id },
             });
           }
         } catch (notifErr) {
-          console.error(">>> Socket Notification Error:", notifErr);
+          if (process.env.NODE_ENV === "development") {
+            console.error("Socket notification error:", notifErr.message);
+          }
         }
 
-        // Get the fully populated chat
         const chat = await Chat.findById(chatId)
           .populate("participants", "-password")
           .populate({
@@ -90,71 +93,78 @@ module.exports = (io) => {
             populate: { path: "sender", select: "username email avatar" },
           });
 
-        const populatedMessage = await Message.findById(message._id)
-          .populate("sender", "username email avatar");
+        const populatedMessage = await Message.findById(message._id).populate("sender", "username email avatar");
 
-        // Emit to the chat room for people with it open
-        io.to(chatId).emit("receiveMessage", populatedMessage);
-
-        // Emit to each participant's personal room for sidebar updates
-        if (chat && chat.participants) {
-          chat.participants.forEach(p => {
+        if (chat?.participants) {
+          chat.participants.forEach((p) => {
             const pId = p._id ? p._id.toString() : p.toString();
             io.to(pId).emit("chatUpdated", chat);
             io.to(pId).emit("receiveMessage", populatedMessage);
           });
         }
       } catch (error) {
-        console.error("Socket sendMessage error:", error);
+        if (process.env.NODE_ENV === "development") {
+          console.error("Socket sendMessage error:", error.message);
+        }
       }
     });
 
-    socket.on("disconnect", async () => {
-      console.log("Client disconnected: " + socket.id);
-
-      // Find userId for this socket.id
-      // Note: In a production app, you might want to map socketId to userId
-      // For now, we expect the frontend to call a "logout" or we infer from rooms
-      // Simplified approach: loop through rooms the socket was in if needed, 
-      // but usually we rely on the `userId` passed in `addUser`
-    });
-
-    // Custom leave/offline handler
-    socket.on("goOffline", async (userId) => {
-      if (!userId) return;
-      onlineUsers.delete(userId);
+    socket.on("goOffline", async () => {
       try {
-        await User.findByIdAndUpdate(userId, { isOnline: false, lastSeen: new Date() });
-        io.emit("statusChange", { userId, isOnline: false, lastSeen: new Date() });
+        await User.findByIdAndUpdate(currentUserId, {
+          isOnline: false,
+          lastSeen: new Date(),
+        });
+        io.emit("statusChange", {
+          userId: currentUserId,
+          isOnline: false,
+          lastSeen: new Date(),
+        });
       } catch (err) {
-        console.error("Error going offline:", err);
+        if (process.env.NODE_ENV === "development") {
+          console.error("Error going offline:", err.message);
+        }
       }
     });
 
-    socket.on("editMessage", (updatedMsg) => {
-      if (!updatedMsg.chat) return;
+    socket.on("editMessage", async (updatedMsg) => {
+      if (!updatedMsg?.chat) return;
+      const message = await Message.findById(updatedMsg._id);
+      if (!message || message.sender.toString().toLowerCase() !== currentUserId) return;
       io.to(updatedMsg.chat).emit("messageUpdated", updatedMsg);
     });
 
-    socket.on("deleteMessage", (updatedMsg) => {
-      if (!updatedMsg.chat) return;
+    socket.on("deleteMessage", async (updatedMsg) => {
+      if (!updatedMsg?.chat) return;
+      const message = await Message.findById(updatedMsg._id);
+      if (!message || message.sender.toString().toLowerCase() !== currentUserId) return;
       io.to(updatedMsg.chat).emit("messageUpdated", updatedMsg);
     });
 
-    socket.on("messageSeen", async ({ chatId, userId }) => {
+    socket.on("messageSeen", async ({ chatId }) => {
       try {
-        // Mark all messages in this chat as 'seen' if they were sent by the other person
+        if (!chatId) return;
+
+        const chat = await Chat.findById(chatId);
+        if (!chat || !chat.participants.some((p) => p.toString().toLowerCase() === currentUserId)) {
+          return;
+        }
+
+        const cId = new mongoose.Types.ObjectId(chatId);
+        const uId = new mongoose.Types.ObjectId(currentUserId);
+
         await Message.updateMany(
-          { chat: chatId, sender: { $ne: userId }, status: { $ne: "seen" } },
-          { status: "seen" }
+          { chat: cId, sender: { $ne: uId }, status: { $ne: "seen" } },
+          { $set: { status: "seen" } }
         );
 
-        // Reset unread count for THIS user
-        let chat = await Chat.findById(chatId);
-        if (chat && chat.unreadCounts) {
-          const uc = chat.unreadCounts.find(u => u.user.toString() === userId.toString());
+        if (chat.unreadCounts) {
+          const uc = chat.unreadCounts.find(
+            (u) => u.user.toString().toLowerCase() === currentUserId
+          );
           if (uc) {
             uc.count = 0;
+            chat.markModified("unreadCounts");
             await chat.save();
           }
         }
@@ -166,19 +176,22 @@ module.exports = (io) => {
             populate: { path: "sender", select: "username email avatar" },
           });
 
-        // Notify the sender that messages were seen
-        io.to(chatId).emit("messagesSeen", { chatId, userId });
-        if (updatedChat) {
-          io.to(chatId).emit("chatUpdated", updatedChat);
+        io.to(chatId).emit("messagesSeen", { chatId, userId: currentUserId });
+        if (updatedChat?.participants) {
+          updatedChat.participants.forEach((p) => {
+            const pId = p._id ? p._id.toString() : p.toString();
+            io.to(pId).emit("chatUpdated", updatedChat);
+          });
         }
       } catch (err) {
-        console.error("Error marking messages as seen:", err);
+        if (process.env.NODE_ENV === "development") {
+          console.error("Error marking messages as seen:", err.message);
+        }
       }
     });
 
     socket.on("messageDelivered", async (messageId) => {
       try {
-        // Only mark as delivered if it was currently just 'sent'
         const msg = await Message.findOneAndUpdate(
           { _id: messageId, status: "sent" },
           { status: "delivered" },
@@ -188,16 +201,36 @@ module.exports = (io) => {
           io.to(msg.chat.toString()).emit("messageUpdated", msg);
         }
       } catch (err) {
-        console.error("Error marking message as delivered:", err);
+        if (process.env.NODE_ENV === "development") {
+          console.error("Error marking message as delivered:", err.message);
+        }
       }
     });
 
-    socket.on("typing", ({ chatId, userId }) => {
-      socket.to(chatId).emit("userTyping", { chatId, userId });
+    socket.on("typing", async ({ chatId }) => {
+      if (!chatId) return;
+      const chat = await Chat.findById(chatId);
+      if (!chat || !chat.participants.some((p) => p.toString().toLowerCase() === currentUserId)) return;
+      socket.to(chatId).emit("userTyping", { chatId, userId: currentUserId });
     });
 
-    socket.on("stopTyping", ({ chatId, userId }) => {
-      socket.to(chatId).emit("userStopTyping", { chatId, userId });
+    socket.on("stopTyping", async ({ chatId }) => {
+      if (!chatId) return;
+      const chat = await Chat.findById(chatId);
+      if (!chat || !chat.participants.some((p) => p.toString().toLowerCase() === currentUserId)) return;
+      socket.to(chatId).emit("userStopTyping", { chatId, userId: currentUserId });
+    });
+
+    socket.on("disconnect", async () => {
+      await User.findByIdAndUpdate(currentUserId, {
+        isOnline: false,
+        lastSeen: new Date(),
+      }).catch(() => {});
+      io.emit("statusChange", {
+        userId: currentUserId,
+        isOnline: false,
+        lastSeen: new Date(),
+      });
     });
   });
 };

@@ -45,11 +45,16 @@ exports.sendGroupMessage = async (req, res, next) => {
         group.latestMessage = newMessage._id;
 
         // Increment unread count for all members except sender
+        const senderIdStr = userId.toString().toLowerCase();
         group.unreadCounts.forEach(uc => {
-            if (uc.user.toString() !== userId.toString()) {
+            if (uc.user.toString().toLowerCase() !== senderIdStr) {
                 uc.count += 1;
+            } else {
+                uc.count = 0; // Ensure sender count is always 0
             }
         });
+
+        group.markModified('unreadCounts');
 
         await group.save();
 
@@ -74,10 +79,21 @@ exports.sendGroupMessage = async (req, res, next) => {
         const populated = await GroupMessage.findById(newMessage._id)
             .populate("sender", "username avatar");
 
-        // Emit to all members via socket
+        // Emit to members via socket
         const io = req.app.get("socketio");
         if (io) {
+            // 1. Send to the group room for active chat window updates
             io.to(`group_${id}`).emit("groupMessage", populated);
+
+            // 2. Send to individual rooms for background notifications/sidebar updates
+            group.members.forEach(memberId => {
+                const mId = memberId.toString();
+                // We add groupName here for the notification sidebar to use
+                io.to(mId).emit("groupMessage", {
+                    ...populated.toObject(),
+                    groupName: group.name
+                });
+            });
         }
 
         res.status(201).json(populated);
@@ -117,19 +133,26 @@ exports.markMessageAsRead = async (req, res, next) => {
     try {
         const { id } = req.params; // groupId
         const userId = req.user._id;
+        const mongoose = require("mongoose");
+        const gId = new mongoose.Types.ObjectId(id);
 
         // 1. Update all messages in this group where user is NOT in readBy
-        await GroupMessage.updateMany(
-            { group: id, readBy: { $ne: userId } },
+        const updateRes = await GroupMessage.updateMany(
+            { group: gId, readBy: { $ne: userId } },
             { $addToSet: { readBy: userId } }
         );
+        console.log(`>>> Group REST: Marked ${updateRes.modifiedCount || updateRes.nModified || 0} messages as read`);
 
         // 2. Reset unread count for this user in the Group model
         const group = await Group.findById(id);
-        if (group) {
-            const userCount = group.unreadCounts.find(uc => uc.user.toString() === userId.toString());
+        if (group && group.unreadCounts) {
+            const userIdStr = userId.toString().toLowerCase();
+            const userCount = group.unreadCounts.find(uc => uc.user.toString().toLowerCase() === userIdStr);
+            console.log(`>>> Group Reset: groupId=${id}, userId=${userIdStr}, found=${!!userCount}`);
             if (userCount) {
+                console.log(`>>> Group Reset: count before=${userCount.count}`);
                 userCount.count = 0;
+                group.markModified('unreadCounts');
                 await group.save();
             }
         }

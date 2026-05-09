@@ -80,7 +80,7 @@ Your goal is to assist users with their queries, analyze their media (images/aud
             try {
                 if (fs.existsSync(file.path)) {
                     console.log(">>> File exists, reading...");
-                    const fileBuffer = fs.readFileSync(file.path);
+                    const fileBuffer = await fs.promises.readFile(file.path);
                     console.log(`>>> File read success: ${fileBuffer.length} bytes`);
                     // Sanitize mimetype (Gemini SDK doesn't like parameters like ;codecs=opus)
                     const cleanMimeType = file.mimetype.split(";")[0];

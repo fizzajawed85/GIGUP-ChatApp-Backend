@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-console.log("Loading AI Routes...");
 const aiController = require('../controllers/ai.controller');
 const { protect } = require('../middlewares/auth.middleware');
 const upload = require('../middlewares/upload.middleware');

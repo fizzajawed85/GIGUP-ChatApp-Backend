@@ -1,60 +1,65 @@
 const Notification = require("../models/Notification");
 
 module.exports = (io) => {
-    io.on("connection", (socket) => {
-        // 1. Signaling: Initial Call Request
-        socket.on("callUser", async (data) => {
-            const { userToCall, signalData, from, callerName, type } = data;
-            console.log(`[CallSocket] ${from} is calling ${userToCall} (${type})`);
+  io.on("connection", (socket) => {
+    const senderId = socket.userId;
+    if (!senderId) return;
 
-            // Save notification
-            try {
-                await Notification.create({
-                    recipient: userToCall,
-                    sender: from,
-                    type: 'call',
-                    title: `Incoming ${type === 'video' ? 'Video' : 'Audio'} Call`,
-                    content: `${callerName} is calling you...`,
-                    data: { from, type }
-                });
-            } catch (err) {
-                console.error("Failed to save call notification:", err);
-            }
+    socket.on("callUser", async (data) => {
+      const { userToCall, signalData, callerName, type } = data || {};
+      const targetId = userToCall?.toString()?.toLowerCase();
+      if (!targetId) return;
 
-            io.to(userToCall).emit("incomingCall", {
-                signal: signalData,
-                from,
-                callerName,
-                type
-            });
+      const room = io.sockets.adapter.rooms.get(targetId);
+      const userCount = room ? room.size : 0;
+
+      if (userCount === 0) {
+        socket.emit("callError", {
+          message: "Recipient is not connected to signaling room.",
         });
+      }
 
-        // 2. Signaling: Answering a Call
-        socket.on("answerCall", (data) => {
-            const { to, signal } = data;
-            console.log(`[CallSocket] Call answered from ${socket.id} to ${to}`);
-            io.to(to).emit("callAccepted", signal);
+      try {
+        await Notification.create({
+          recipient: targetId,
+          sender: senderId,
+          type: "call",
+          title: `Incoming ${type === "video" ? "Video" : "Audio"} Call`,
+          content: `${callerName} is calling you...`,
+          data: { from: senderId, type },
         });
+      } catch (err) {
+        if (process.env.NODE_ENV === "development") {
+          console.error("Failed to save call notification:", err.message);
+        }
+      }
 
-        // 3. Signaling: ICE Candidates
-        socket.on("iceCandidate", (data) => {
-            const { to, candidate } = data;
-            console.log(`[CallSocket] ICE Candidate relayed to ${to}`);
-            io.to(to).emit("iceCandidate", candidate);
-        });
-
-        // 4. End Call Notification
-        socket.on("endCall", (data) => {
-            const { to } = data;
-            console.log(`[CallSocket] Call ended by ${socket.id}, notifying ${to}`);
-            io.to(to).emit("callEnded");
-        });
-
-        // 5. Decline Call
-        socket.on("declineCall", (data) => {
-            const { to } = data;
-            console.log(`[CallSocket] Call declined by ${socket.id}, notifying ${to}`);
-            io.to(to).emit("callDeclined");
-        });
+      io.to(targetId).emit("incomingCall", {
+        signal: signalData,
+        from: senderId,
+        callerName,
+        type,
+      });
     });
+
+    socket.on("answerCall", (data) => {
+      const targetId = data?.to?.toString()?.toLowerCase();
+      if (targetId) io.to(targetId).emit("callAccepted", data.signal);
+    });
+
+    socket.on("iceCandidate", (data) => {
+      const targetId = data?.to?.toString()?.toLowerCase();
+      if (targetId) io.to(targetId).emit("iceCandidate", data.candidate);
+    });
+
+    socket.on("endCall", (data) => {
+      const targetId = data?.to?.toString()?.toLowerCase();
+      if (targetId) io.to(targetId).emit("callEnded");
+    });
+
+    socket.on("declineCall", (data) => {
+      const targetId = data?.to?.toString()?.toLowerCase();
+      if (targetId) io.to(targetId).emit("callDeclined");
+    });
+  });
 };

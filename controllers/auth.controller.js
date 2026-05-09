@@ -1,92 +1,96 @@
-// controllers/auth.controller.js
-const User = require('../models/User');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
+const User = require("../models/User");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const sendEmail = require("../utils/sendEmail");
 
-// REGISTER
+const toPublicUser = (user) => {
+  const userObj = user.toObject ? user.toObject() : user;
+  delete userObj.password;
+  delete userObj.otp;
+  delete userObj.otpExpire;
+  delete userObj.resetPasswordToken;
+  delete userObj.resetPasswordExpire;
+  delete userObj.otpAttempts;
+  delete userObj.otpBlockedUntil;
+  delete userObj.lastOtpRequestedAt;
+  return userObj;
+};
+
+const createToken = (userId) =>
+  jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
+
 exports.registerUser = async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
     if (!username || !email || !password) {
-      return res.status(400).json({ message: 'All fields are required' });
+      return res.status(400).json({ message: "All fields are required" });
     }
 
-    // check user exists
-    const userExists = await User.findOne({ email });
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "JWT secret is not configured" });
+    }
+
+    const userExists = await User.findOne({ $or: [{ email }, { username }] });
     if (userExists) {
-      return res.status(400).json({ message: 'User already exists' });
+      return res.status(400).json({ message: "User already exists" });
     }
 
-    // hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // create user
     const user = await User.create({
       username,
       email,
-      password: hashedPassword
+      password: hashedPassword,
     });
 
-    // generate JWT token
-    const token = jwt.sign(
-      { id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-   res.status(201).json({
-  message: "User registered successfully",
-  token,
-  user,
-  });
+    const token = createToken(user._id);
+    res.status(201).json({
+      message: "User registered successfully",
+      token,
+      user: toPublicUser(user),
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: "Registration failed" });
   }
 };
 
-// LOGIN
 exports.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required' });
+      return res.status(400).json({ message: "Email and password are required" });
     }
 
-    // find user
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "JWT secret is not configured" });
+    }
+
     const user = await User.findOne({ email });
+    const invalidAuthMessage = "Invalid email or password";
     if (!user || !user.password) {
-      return res.status(400).json({ message: 'User not found' });
+      return res.status(400).json({ message: invalidAuthMessage });
     }
 
-    // compare password
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ message: 'Wrong password' });
+      return res.status(400).json({ message: invalidAuthMessage });
     }
 
-    // generate token
-    const token = jwt.sign(
-      { id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
+    const token = createToken(user._id);
     res.json({
       message: "Login successful",
       token,
-      user,
+      user: toPublicUser(user),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: "Login failed" });
   }
 };
 
-// SOCIAL LOGIN
 exports.socialLogin = async (req, res) => {
   try {
     const { provider, socialId, username, email } = req.body;
@@ -95,141 +99,157 @@ exports.socialLogin = async (req, res) => {
       return res.status(400).json({ message: "Missing data for social login" });
     }
 
-    // check if user exists
-    let user = await User.findOne({ email });
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "JWT secret is not configured" });
+    }
 
+    let user = await User.findOne({ email });
     if (!user) {
-      // create new user
       user = await User.create({
-        username,          // username instead of name
+        username,
         email,
-        password: "",      // no password for social login
+        password: "",
         socialProvider: provider,
-        socialId
+        socialId,
       });
     }
 
-    // generate JWT token
-    const token = jwt.sign(
-      { id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
+    const token = createToken(user._id);
     res.json({
       message: "Social login successful",
       token,
-      user,
+      user: toPublicUser(user),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: "Social login failed" });
   }
 };
 
-// FORGOT PASSWORD (with OTP)
 exports.forgotPassword = async (req, res) => {
-  const { email } = req.body;
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
 
-  const user = await User.findOne({ email });
-  if (!user) return res.status(404).json({ message: "User not found" });
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(200).json({ message: "If account exists, OTP has been sent" });
+    }
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const now = Date.now();
+    if (user.otpBlockedUntil && user.otpBlockedUntil.getTime() > now) {
+      return res.status(429).json({ message: "Too many attempts. Try again later." });
+    }
 
-  user.otp = otp;
-  user.otpExpire = Date.now() + 10 * 60 * 1000;
-  await user.save();
+    if (user.lastOtpRequestedAt && now - user.lastOtpRequestedAt.getTime() < 60 * 1000) {
+      return res.status(429).json({ message: "Please wait before requesting another OTP." });
+    }
 
-  await sendEmail({
-    to: email,
-    subject: "Gigup Password Reset OTP",
-    html: `
-      <h2>Password Reset OTP</h2>
-      <p>Your OTP is:</p>
-      <h1>${otp}</h1>
-      <p>This OTP will expire in 10 minutes.</p>
-    `,
-  });
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
 
-  res.json({ message: "OTP sent to your email" });
+    user.otp = otpHash;
+    user.otpExpire = now + 10 * 60 * 1000;
+    user.otpAttempts = 0;
+    user.otpBlockedUntil = undefined;
+    user.lastOtpRequestedAt = now;
+    await user.save();
+
+    await sendEmail({
+      to: email,
+      subject: "Gigup Password Reset OTP",
+      html: `
+        <h2>Password Reset OTP</h2>
+        <p>Your OTP is:</p>
+        <h1>${otp}</h1>
+        <p>This OTP will expire in 10 minutes.</p>
+      `,
+    });
+
+    res.status(200).json({ message: "If account exists, OTP has been sent" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to process forgot password request" });
+  }
 };
 
-// VERIFY OTP
 exports.verifyOtp = async (req, res) => {
   try {
     const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ message: "Email and OTP required" });
+    }
 
-    if (!email || !otp) return res.status(400).json({ message: 'Email and OTP required' });
+    const user = await User.findOne({ email });
+    if (!user || !user.otp || !user.otpExpire || user.otpExpire.getTime() <= Date.now()) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
 
-    const user = await User.findOne({
-      email,
-      otp,
-      otpExpire: { $gt: Date.now() }
-    });
+    if (user.otpBlockedUntil && user.otpBlockedUntil.getTime() > Date.now()) {
+      return res.status(429).json({ message: "Too many attempts. Try again later." });
+    }
 
-    if (!user) return res.status(400).json({ message: 'Invalid or expired OTP' });
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+    if (otpHash !== user.otp) {
+      user.otpAttempts = (user.otpAttempts || 0) + 1;
+      if (user.otpAttempts >= 5) {
+        user.otpBlockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+      }
+      await user.save();
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
 
-    // OTP verified – generate temporary reset token
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    user.resetPasswordToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-    user.resetPasswordExpire = Date.now() + 15 * 60 * 1000; // 15 minutes validity
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    user.resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+    user.resetPasswordExpire = Date.now() + 15 * 60 * 1000;
     user.otp = undefined;
     user.otpExpire = undefined;
+    user.otpAttempts = 0;
+    user.otpBlockedUntil = undefined;
     await user.save();
 
-    res.json({ message: 'OTP verified', resetToken });
+    res.json({ message: "OTP verified", resetToken });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: "OTP verification failed" });
   }
 };
 
-
-
-// RESET PASSWORD
 exports.resetPassword = async (req, res) => {
   try {
-    const resetToken = crypto
-      .createHash('sha256')
-      .update(req.params.token)
-      .digest('hex');
+    const resetToken = crypto.createHash("sha256").update(req.params.token).digest("hex");
 
     const user = await User.findOne({
       resetPasswordToken: resetToken,
-      resetPasswordExpire: { $gt: Date.now() }
+      resetPasswordExpire: { $gt: Date.now() },
     });
 
     if (!user) {
-      return res.status(400).json({ message: 'Invalid or expired token' });
+      return res.status(400).json({ message: "Invalid or expired token" });
     }
 
     const { password } = req.body;
     if (!password) {
-      return res.status(400).json({ message: 'Password is required' });
+      return res.status(400).json({ message: "Password is required" });
     }
 
-    // hash new password
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(password, salt);
-
-    // clear reset token
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
-
     await user.save();
 
-    // ✅ Send confirmation email
     await sendEmail({
       to: user.email,
       subject: "Password Reset Successful",
       html: `
         <h2>Password Changed Successfully</h2>
         <p>Your Gigup account password has been reset.</p>
-        <p>If this wasn't you, contact support immediately.</p>
+        <p>If this was not you, contact support immediately.</p>
       `,
     });
 
-    res.json({ message: 'Password reset successful, confirmation email sent' });
-
+    res.json({ message: "Password reset successful, confirmation email sent" });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: "Password reset failed" });
   }
 };

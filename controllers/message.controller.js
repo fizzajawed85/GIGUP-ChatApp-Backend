@@ -75,21 +75,25 @@ exports.sendMessage = async (req, res, next) => {
     if (!chat.unreadCounts) chat.unreadCounts = [];
 
     chat.participants.forEach(pId => {
-      const pIdStr = pId._id ? pId._id.toString() : pId.toString(); // Handle both populated and unpopulated participants
-      if (!chat.unreadCounts.some(uc => uc.user.toString() === pIdStr)) {
+      const pIdStr = (pId._id || pId).toString().toLowerCase();
+      if (!chat.unreadCounts.some(uc => uc.user.toString().toLowerCase() === pIdStr)) {
         chat.unreadCounts.push({ user: pIdStr, count: 0 });
       }
     });
 
-    // Increment unread counts for everyone EXCEPT the sender
+    // Set sender's unread count to 0 and increment for others
+    const userIdStr = loggedInUserId.toString().toLowerCase();
     chat.unreadCounts.forEach(uc => {
-      if (uc.user.toString() !== loggedInUserId.toString()) {
+      if (uc.user.toString().toLowerCase() === userIdStr) {
+        uc.count = 0;
+      } else {
         uc.count += 1;
       }
     });
 
     chat.latestMessage = message._id;
     chat.archivedBy = [];
+    chat.markModified('unreadCounts');
     await chat.save();
 
     // --- NOTIFICATION PERSISTENCE ---
@@ -128,11 +132,12 @@ exports.sendMessage = async (req, res, next) => {
     // Socket Emissions
     const io = req.app.get("socketio");
     if (io) {
-      io.to(chatId).emit("receiveMessage", populatedMessage);
+      // 1. Update the chat unread/latest message in all participants' sidebars
       if (chat && chat.participants) {
         chat.participants.forEach(p => {
           const pId = p._id ? p._id.toString() : p.toString();
           io.to(pId).emit("chatUpdated", chat);
+          // 2. Deliver message to participant (triggers notification if background)
           io.to(pId).emit("receiveMessage", populatedMessage);
         });
       }

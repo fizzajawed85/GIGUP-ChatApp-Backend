@@ -5,6 +5,7 @@ const userSchema = new mongoose.Schema(
     username: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
     password: { type: String },
+    role: { type: String, enum: ["user", "ai"], default: "user" },
 
     // social login
     socialProvider: { type: String },
@@ -17,6 +18,9 @@ const userSchema = new mongoose.Schema(
     // OTP for verification
     otp: { type: String },
     otpExpire: { type: Date },
+    otpAttempts: { type: Number, default: 0 },
+    otpBlockedUntil: { type: Date },
+    lastOtpRequestedAt: { type: Date },
 
     // Profile Details
     avatar: { type: String, default: "" }, // URL to image

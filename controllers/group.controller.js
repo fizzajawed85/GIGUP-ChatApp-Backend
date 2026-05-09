@@ -64,12 +64,56 @@ exports.getGroups = async (req, res, next) => {
     try {
         const userId = req.user._id;
 
-        const groups = await Group.find({ members: userId })
+        const groupDocs = await Group.find({ members: userId })
             .populate("members", "username avatar")
             .populate("latestMessage")
             .sort({ updatedAt: -1 });
 
-        res.json(groups);
+        // SELF-HEALING & SUPER RECONCILIATION: 
+        const myIdStr = userId.toString().toLowerCase();
+        for (let group of groupDocs) {
+            if (!group.unreadCounts) group.unreadCounts = [];
+
+            // 1. Ensure user has an entry
+            let myUc = group.unreadCounts.find(uc => uc.user?.toString()?.toLowerCase() === myIdStr);
+            if (!myUc) {
+                myUc = { user: userId, count: 0 };
+                group.unreadCounts.push(myUc);
+                group.markModified('unreadCounts');
+            }
+
+            // 2. Reconciliation: Count actual unread messages
+            const latestSenderId = group.latestMessage?.sender?._id || group.latestMessage?.sender;
+            const latestSenderIdStr = latestSenderId?.toString()?.toLowerCase();
+
+            let actualUnreadCount = 0;
+            if (latestSenderIdStr && latestSenderIdStr !== myIdStr) {
+                actualUnreadCount = await GroupMessage.countDocuments({
+                    group: group._id,
+                    readBy: { $ne: userId }
+                });
+
+                if (actualUnreadCount > 0) {
+                    const sample = await GroupMessage.findOne({
+                        group: group._id,
+                        readBy: { $ne: userId }
+                    });
+                    console.log(`>>> Forensic Group: Group ${group._id} has ${actualUnreadCount} unread. Sample msg: ${sample?._id}`);
+                }
+            }
+
+            if (myUc.count !== actualUnreadCount) {
+                console.log(`>>> Reconciling group ${group._id}: DB count ${myUc.count} -> Actual ${actualUnreadCount}`);
+                myUc.count = actualUnreadCount;
+                group.markModified('unreadCounts');
+            }
+
+            if (group.isModified('unreadCounts')) {
+                await group.save();
+            }
+        }
+
+        res.json(groupDocs);
     } catch (error) {
         next(error);
     }
